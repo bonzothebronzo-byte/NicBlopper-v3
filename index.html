@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>NicoBlopper — Nicotine Gum Tracker</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- React & ReactDOM (Development versions for better error messages, switch to production for deploy) -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <!-- Babel for in-browser JSX compilation -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <style>
+      /* Prevent pull-to-refresh on mobile */
+      body {
+        overscroll-behavior-y: contain;
+        -webkit-tap-highlight-color: transparent;
+      }
+    </style>
+<script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@^19.2.4",
+    "react/": "https://esm.sh/react@^19.2.4/",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.4/"
+  }
+}
+</script>
+</head>
+<body class="bg-slate-950 text-slate-100 font-sans antialiased pb-20">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        // Destructure React hooks
+        const { useState, useEffect, useMemo } = React;
+
+        // --- CONSTANTS ---
+        const PHARMA = {
+            BIOAVAILABILITY: 0.55,
+            VOLUME_DISTRIBUTION_L: 195,
+            HALF_LIFE_MINUTES: 120,
+            TIME_TO_PEAK_MINUTES: 35, // Approximate
+            MAX_DAILY_DOSE_MG: 40,
+        };
+
+        const KE = Math.log(2) / PHARMA.HALF_LIFE_MINUTES; // Elimination rate constant
+        const KA = 0.05; // Simplified KA approximation
+
+        const UI_CONSTANTS = {
+            SPIT_OUT_TIME_MIN: 31,
+            NEXT_DOSE_TIME_MIN: 55,
+        };
+
+        // --- STORAGE SERVICE ---
+        const STORAGE_KEY = 'nicoblopper_logs';
+
+        const getLogs = () => {
+            try {
+                const stored = localStorage.getItem(STORAGE_KEY);
+                return stored ? JSON.parse(stored) : [];
+            } catch (e) {
+                console.error("Failed to load logs", e);
+                return [];
+            }
+        };
+
+        const saveLogs = (logs) => {
+            try {
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(logs));
+            } catch (e) {
+                console.error("Failed to save logs", e);
+            }
+        };
+
+        // --- COMPONENTS ---
+
+        // 1. DoseSelector
+        const DoseSelector = ({ onAddDose }) => {
+            const [flashingDose, setFlashingDose] = useState(null);
+
+            const handleDoseClick = (amount) => {
+                setFlashingDose(amount);
+                onAddDose(amount);
+                
+                setTimeout(() => {
+                    setFlashingDose(null);
+                }, 200);
+            };
+
+            const getButtonClasses = (amount) => {
+                const isFlashing = flashingDose === amount;
+                const baseClasses = "h-24 transition-all duration-100 rounded-2xl shadow-lg flex flex-col items-center justify-center text-white disabled:cursor-not-allowed disabled:transform-none touch-manipulation";
+                
+                let colorClasses = "";
+                if (amount === 1) {
+                    colorClasses = isFlashing 
+                        ? "bg-cyan-800 scale-95" 
+                        : "bg-cyan-600 hover:bg-cyan-500 active:bg-cyan-800 active:scale-95";
+                } else if (amount === 2) {
+                    colorClasses = isFlashing 
+                        ? "bg-indigo-800 scale-95" 
+                        : "bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-800 active:scale-95";
+                } else {
+                    colorClasses = isFlashing 
+                        ? "bg-purple-800 scale-95" 
+                        : "bg-purple-600 hover:bg-purple-500 active:bg-purple-800 active:scale-95";
+                }
+
+                return `${baseClasses} ${colorClasses}`;
+            };
+
+            return (
+                <div className="mb-6 relative">
+                    <div className="grid grid-cols-3 gap-4 transition-opacity duration-300 opacity-100">
+                        <button onClick={() => handleDoseClick(1)} className={getButtonClasses(1)}>
+                            <span className="text-3xl font-bold">1<span className="text-sm font-normal">mg</span></span>
+                        </button>
+                        <button onClick={() => handleDoseClick(2)} className={getButtonClasses(2)}>
+                            <span className="text-3xl font-bold">2<span className="text-sm font-normal">mg</span></span>
+                        </button>
+                        <button onClick={() => handleDoseClick(4)} className={getButtonClasses(4)}>
+                            <span className="text-3xl font-bold">4<span className="text-sm font-normal">mg</span></span>
+                        </button>
+                    </div>
+                </div>
+            );
+        };
+
+        // 2. BloodLevelDisplay
+        const BloodLevelDisplay = ({ logs }) => {
+            const [level, setLevel] = useState(0);
+
+            useEffect(() => {
+                const calculate = () => {
+                    const now = Date.now();
+                    let totalConcentration = 0; // in ng/mL
+
+                    logs.forEach(log => {
+                        const timeDiffMinutes = (now - log.timestamp) / 60000;
+                        
+                        if (timeDiffMinutes < 0 || timeDiffMinutes > 1440) return;
+
+                        const D = log.amount * 1_000_000;
+                        const V = PHARMA.VOLUME_DISTRIBUTION_L * 1000;
+                        
+                        const term1 = (D * PHARMA.BIOAVAILABILITY) / V;
+                        const term2 = KA / (KA - KE);
+                        const term3 = Math.exp(-KE * timeDiffMinutes) - Math.exp(-KA * timeDiffMinutes);
+
+                        const concentration = term1 * term2 * term3;
+                        
+                        if (concentration > 0) {
+                            totalConcentration += concentration;
+                        }
+                    });
+
+                    setLevel(totalConcentration);
+                };
+
+                calculate();
+                const interval = setInterval(calculate, 1000);
+                return () => clearInterval(interval);
+            }, [logs]);
+
+            return (
+                <div className="bg-slate-900 p-6 rounded-2xl shadow-sm border border-slate-800 mb-6 text-center">
+                    <h2 className="text-slate-400 text-sm font-medium uppercase tracking-wide mb-1">
+                        Est. Saturation
+                    </h2>
+                    <div className="flex items-baseline justify-center gap-2">
+                        <span className="text-4xl font-extrabold text-slate-100">
+                            {level.toFixed(1)}
+                        </span>
+                        <span className="text-slate-500 font-medium">ng/mL</span>
+                    </div>
+                    <p className="text-xs text-slate-500 mt-2 italic">
+                        *Approximation based on 65kg male model.
+                    </p>
+                </div>
+            );
+        };
+
+        // 3. Timers
+        const Timers = ({ logs }) => {
+            const [now, setNow] = useState(Date.now());
+
+            useEffect(() => {
+                const interval = setInterval(() => setNow(Date.now()), 1000);
+                return () => clearInterval(interval);
+            }, []);
+
+            const todayStr = new Date().toDateString();
+            const todaysLogs = logs.filter(l => new Date(l.timestamp).toDateString() === todayStr);
+            const totalToday = todaysLogs.reduce((sum, log) => sum + log.amount, 0);
+            const remainingDaily = PHARMA.MAX_DAILY_DOSE_MG - totalToday;
+
+            const lastLog = logs.length > 0 ? logs[0] : null;
+
+            const getMinutesRemaining = (durationMinutes) => {
+                if (!lastLog) return null;
+                const elapsed = (now - lastLog.timestamp) / 60000;
+                const remaining = durationMinutes - elapsed;
+                return remaining;
+            };
+
+            const spitRemaining = getMinutesRemaining(UI_CONSTANTS.SPIT_OUT_TIME_MIN);
+            const nextDoseRemaining = getMinutesRemaining(UI_CONSTANTS.NEXT_DOSE_TIME_MIN);
+
+            const formatTime = (minutes) => {
+                if (minutes <= 0) return "0:00";
+                const m = Math.floor(minutes);
+                const s = Math.floor((minutes - m) * 60);
+                return `${m}:${s.toString().padStart(2, '0')}`;
+            };
+
+            return (
+                <div className="space-y-4 mb-6">
+                    {/* Daily Allowance */}
+                    <div className="bg-slate-900 p-4 rounded-xl shadow-sm border border-slate-800 flex justify-between items-center">
+                        <span className="font-medium text-slate-300">Daily Remaining</span>
+                        <div className="text-right">
+                             <span className={`text-2xl font-bold ${remainingDaily <= 0 ? 'text-red-400' : 'text-slate-100'}`}>
+                            {remainingDaily}
+                            </span>
+                            <span className="text-sm text-slate-500"> / {PHARMA.MAX_DAILY_DOSE_MG} mg</span>
+                        </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4">
+                        {/* Spit Out Timer */}
+                        <div className="bg-slate-900 p-4 rounded-xl shadow-sm border border-slate-800">
+                           <h3 className="text-xs font-bold text-slate-500 uppercase mb-1">Gum Depleted ({UI_CONSTANTS.SPIT_OUT_TIME_MIN}m)</h3>
+                           {lastLog ? (
+                             <div className={`text-2xl font-mono font-bold ${(spitRemaining || 0) <= 0 ? 'text-green-400' : 'text-slate-100'}`}>
+                               {spitRemaining && spitRemaining > 0 ? formatTime(spitRemaining) : "READY"}
+                             </div>
+                           ) : (
+                             <div className="text-xl text-slate-700">--:--</div>
+                           )}
+                        </div>
+
+                        {/* Next Dose Timer */}
+                        <div className="bg-slate-900 p-4 rounded-xl shadow-sm border border-slate-800">
+                           <h3 className="text-xs font-bold text-slate-500 uppercase mb-1">Cooldown Done ({UI_CONSTANTS.NEXT_DOSE_TIME_MIN}m)</h3>
+                           {lastLog ? (
+                             <div className={`text-2xl font-mono font-bold ${(nextDoseRemaining || 0) <= 0 ? 'text-green-400' : 'text-slate-100'}`}>
+                               {nextDoseRemaining && nextDoseRemaining > 0 ? formatTime(nextDoseRemaining) : "READY"}
+                             </div>
+                           ) : (
+                             <div className="text-xl text-slate-700">--:--</div>
+                           )}
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // 4. LogTable
+        const LogTable = ({ logs, onDelete }) => {
+            const displayLogs = logs.slice(0, 20);
+
+            const formatTime = (ts) => {
+                return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            };
+
+            return (
+                <div className="bg-slate-900 rounded-xl shadow-sm border border-slate-800 overflow-hidden mb-6">
+                    <div className="px-4 py-3 bg-slate-800 border-b border-slate-700 flex justify-between items-center">
+                        <h3 className="font-semibold text-slate-200">Today's Log (Last 20)</h3>
+                    </div>
+                    <table className="w-full text-left text-sm">
+                        <thead className="bg-slate-800 text-slate-400 font-medium">
+                            <tr>
+                                <th className="px-4 py-2">Time</th>
+                                <th className="px-4 py-2">Dose</th>
+                                <th className="px-4 py-2 text-right">Action</th>
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-800">
+                            {displayLogs.map(log => (
+                                <tr key={log.id} className="hover:bg-slate-800/50">
+                                    <td className="px-4 py-3 text-slate-300">{formatTime(log.timestamp)}</td>
+                                    <td className="px-4 py-3">
+                                        <span className={`inline-block px-2 py-1 rounded text-xs font-bold 
+                                            ${log.amount === 1 ? 'bg-cyan-900/40 text-cyan-300 border border-cyan-800/50' : 
+                                            log.amount === 2 ? 'bg-indigo-900/40 text-indigo-300 border border-indigo-800/50' : 
+                                            'bg-purple-900/40 text-purple-300 border border-purple-800/50'}`}>
+                                            {log.amount} mg
+                                        </span>
+                                    </td>
+                                    <td className="px-4 py-3 text-right">
+                                        <button 
+                                            onClick={() => onDelete(log.id)}
+                                            className="text-red-400 hover:text-red-300 font-medium text-xs px-2 py-1"
+                                        >
+                                            Delete
+                                        </button>
+                                    </td>
+                                </tr>
+                            ))}
+                            {displayLogs.length === 0 && (
+                                <tr>
+                                    <td colSpan={3} className="px-4 py-6 text-center text-slate-500 italic">
+                                        No doses logged today.
+                                    </td>
+                                </tr>
+                            )}
+                        </tbody>
+                    </table>
+                </div>
+            );
+        };
+
+        // 5. WeeklyStats
+        const WeeklyStats = ({ logs }) => {
+            const stats = useMemo(() => {
+                const dailyTotals = {};
+                
+                logs.forEach(log => {
+                    const dateKey = new Date(log.timestamp).toLocaleDateString();
+                    dailyTotals[dateKey] = (dailyTotals[dateKey] || 0) + log.amount;
+                });
+
+                const sortedDates = Object.keys(dailyTotals).sort((a, b) => {
+                    return new Date(b).getTime() - new Date(a).getTime();
+                });
+
+                const recentDays = sortedDates.slice(0, 7);
+                const sum = recentDays.reduce((acc, date) => acc + dailyTotals[date], 0);
+                const count = recentDays.length;
+                const average = count > 0 ? sum / count : 0;
+
+                return {
+                    average,
+                    days: recentDays.map(date => ({
+                        date,
+                        total: dailyTotals[date]
+                    }))
+                };
+            }, [logs]);
+
+            return (
+                <div className="bg-slate-900 rounded-xl shadow-sm border border-slate-800 overflow-hidden mb-20">
+                    <div className="px-4 py-3 bg-slate-800 border-b border-slate-700 flex justify-between items-center">
+                        <h3 className="font-semibold text-slate-200">7-Day Analysis</h3>
+                        <span className="text-xs bg-slate-700 border border-slate-600 px-2 py-1 rounded text-slate-300">
+                            Avg: {stats.average.toFixed(1)} mg
+                        </span>
+                    </div>
+                    <div className="divide-y divide-slate-800">
+                        {stats.days.map(day => {
+                           const isLower = day.total < stats.average;
+                           const isHigher = day.total > stats.average;
+                           
+                           return (
+                            <div key={day.date} className="flex justify-between items-center px-4 py-3">
+                                <span className="text-sm text-slate-400">{day.date}</span>
+                                <div className="flex items-center gap-2">
+                                    <span className={`font-mono font-bold ${
+                                        isLower ? 'text-green-400' : isHigher ? 'text-red-400' : 'text-slate-300'
+                                    }`}>
+                                        {day.total} mg
+                                    </span>
+                                    <div className="w-16 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                                        <div 
+                                            className={`h-full ${isLower ? 'bg-green-500' : 'bg-red-500'}`} 
+                                            style={{ width: `${Math.min(100, (day.total / PHARMA.MAX_DAILY_DOSE_MG) * 100)}%` }}
+                                        ></div>
+                                    </div>
+                                </div>
+                            </div>
+                           );
+                        })}
+                        {stats.days.length === 0 && (
+                           <div className="px-4 py-6 text-center text-slate-500 italic text-sm">
+                             Not enough data for 7-day analysis.
+                           </div>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        // --- APP COMPONENT ---
+        const App = () => {
+            const [logs, setLogs] = useState([]);
+            const [loaded, setLoaded] = useState(false);
+
+            useEffect(() => {
+                const data = getLogs();
+                data.sort((a, b) => b.timestamp - a.timestamp);
+                setLogs(data);
+                setLoaded(true);
+            }, []);
+
+            useEffect(() => {
+                if (loaded) {
+                    saveLogs(logs);
+                }
+            }, [logs, loaded]);
+
+            const generateId = () => {
+                if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+                    return crypto.randomUUID();
+                }
+                return Date.now().toString(36) + Math.random().toString(36).substr(2);
+            };
+
+            const handleAddDose = (amount) => {
+                const newEntry = {
+                    id: generateId(),
+                    amount,
+                    timestamp: Date.now(),
+                };
+                setLogs(prev => [newEntry, ...prev]);
+            };
+
+            const handleDeleteDose = (id) => {
+                setLogs(prev => prev.filter(log => log.id !== id));
+            };
+
+            if (!loaded) return null;
+
+            return (
+                <div className="min-h-screen bg-slate-950">
+                    {/* Header */}
+                    <header className="bg-slate-900 border-b border-slate-800 sticky top-0 z-10 shadow-sm">
+                        <div className="max-w-md mx-auto px-4 py-3">
+                            <h1 className="text-xl font-black text-slate-100 tracking-tight text-center">
+                                Nico<span className="text-cyan-500">Blopper</span> — Nicotine Gum Tracker
+                            </h1>
+                        </div>
+                    </header>
+
+                    {/* Main Content */}
+                    <main className="max-w-md mx-auto px-4 py-6">
+                        <DoseSelector onAddDose={handleAddDose} />
+                        <BloodLevelDisplay logs={logs} />
+                        <Timers logs={logs} />
+                        <LogTable logs={logs} onDelete={handleDeleteDose} />
+                        <WeeklyStats logs={logs} />
+
+                        {/* Footer */}
+                        <footer className="mt-8 mb-4 border-t border-slate-900 pt-6">
+                            <p className="text-[10px] text-slate-600 text-center leading-relaxed font-medium mb-4">
+                            NicoBlopper is a tracking tool for educational and informational purposes only. It uses a standard mathematical formula (Bateman function) to simulate theoretical nicotine levels. It is not a medical device and does not measure actual physiological data. Do not use this tool to make medical decisions. Consult a healthcare professional for advice on quitting smoking.
+                            </p>
+                            <p className="text-[10px] text-slate-700 text-center font-medium opacity-60">
+                                &copy; Damp Doily
+                            </p>
+                        </footer>
+                    </main>
+                </div>
+            );
+        };
+
+        // --- RENDER ---
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>

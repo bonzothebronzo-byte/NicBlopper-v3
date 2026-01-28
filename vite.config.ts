@@ -1,0 +1,1 @@
+// Config not required for index.html standalone version

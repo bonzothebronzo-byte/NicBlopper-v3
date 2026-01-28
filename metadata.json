@@ -1,0 +1,5 @@
+{
+  "name": "NicoBlopper v3",
+  "description": "A mobile-first nicotine gum tracker with real-time blood concentration estimation and safety timers.",
+  "requestFramePermissions": []
+}
